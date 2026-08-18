@@ -81,23 +81,37 @@
         .filter-group .filter-actions {
             display: flex;
             gap: 4px;
-            margin-bottom: 4px;
+            margin-bottom: 6px;
         }
         .filter-group .filter-actions button {
             font-size: 0.7rem;
             padding: 2px 8px;
         }
-        .filter-group select {
-            width: 100%;
-            height: 80px;
-            font-size: 0.85rem;
-            border: 1px solid #d1d5db;
+        .filter-group .checkbox-list {
+            max-height: 120px;
+            overflow-y: auto;
+            border: 1px solid #e2e8f0;
             border-radius: 4px;
-            padding: 4px;
+            padding: 4px 6px;
             background: white;
         }
-        .filter-group select[multiple] { height: 80px; }
-        .filter-group select option { padding: 2px 4px; }
+        .filter-group .checkbox-item {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 0.85rem;
+            padding: 1px 0;
+        }
+        .filter-group .checkbox-item input[type="checkbox"] {
+            margin: 0;
+            cursor: pointer;
+        }
+        .filter-group .checkbox-item label {
+            font-weight: normal;
+            cursor: pointer;
+            margin: 0;
+            flex: 1;
+        }
         .controls-row {
             display: flex;
             flex-wrap: wrap;
@@ -229,7 +243,6 @@
         .footer { margin-top: 20px; color: #64748b; font-size: 0.85rem; }
         .other-row { font-style: italic; color: #64748b; }
         .no-data { color: #94a3b8; text-align: center; padding: 20px; }
-        .debug-highlight { background: #fff3cd; padding: 2px 6px; border-radius: 3px; }
     </style>
 </head>
 <body>
@@ -288,7 +301,7 @@
 <div id="logArea" class="log">📌 Log will appear here.</div>
 
 <div class="footer">
-    <strong>How it works:</strong> The tool counts uninstalled shops by each categorical column. Use the filters (multi-select) to drill down. Percentages are relative to the filtered set.<br>
+    <strong>How it works:</strong> The tool counts uninstalled shops by each categorical column. Use the filters (checkboxes) to drill down. Percentages are relative to the filtered set.<br>
     Columns analyzed: <em>Shop Country, Group, Usage Time Type, Uninstall Reason Categories, Latest Shopify Plan Known to Findter</em>.<br>
     Use "Top N" to show only the most frequent values (others grouped into "Other").
 </div>
@@ -352,7 +365,7 @@
             return result;
         }
 
-        // Modified: include empty string as a value if any row has empty for that column
+        // Include empty string as a value if any row has empty for that column
         function getUniqueValues(data, colName) {
             const set = new Set();
             let hasEmpty = false;
@@ -364,7 +377,6 @@
                     set.add(val);
                 }
             });
-            // Convert to array and sort
             const vals = Array.from(set).sort();
             if (hasEmpty) {
                 vals.push('');  // represent blank as empty string
@@ -372,11 +384,10 @@
             return vals;
         }
 
-        // Count occurrences, including empty as a category
         function countValues(data, colName) {
             const counts = {};
             data.forEach(row => {
-                const val = row[colName] || ''; // treat undefined as empty
+                const val = row[colName] || '';
                 counts[val] = (counts[val] || 0) + 1;
             });
             return counts;
@@ -430,8 +441,6 @@
             const nonEmptyLines = rawLines.filter(line => line.trim() !== '');
             let logMsg = `📋 Total raw lines (including blanks): ${rawLines.length}\n`;
             logMsg += `📋 Non-empty lines: ${nonEmptyLines.length}\n`;
-
-            // Preview first few non-empty lines
             if (nonEmptyLines.length > 0) {
                 logMsg += `📋 Preview of first non-empty line:\n  ${nonEmptyLines[0]}\n`;
             }
@@ -452,7 +461,6 @@
             }
 
             logMsg += `📋 Parsed rows (including header): ${rows.length}\n`;
-
             if (rows.length < 2) {
                 setStatus('Need at least a header row and one data row.', 'error');
                 logArea.textContent = logMsg;
@@ -461,7 +469,6 @@
 
             const headerRow = rows[0];
             headers = headerRow.map(h => h.trim());
-
             logMsg += '📋 Columns found:\n' + headers.map((h,i) => `  ${i}: ${h}`).join('\n');
 
             const foundColumns = [];
@@ -496,71 +503,96 @@
             setStatus(`✅ Analysis complete. Processed ${allData.length} rows.`, 'info');
         }
 
+        // ----- Build filter UI with checkboxes -----
         function buildFilterUI(columns) {
             filterContainer.innerHTML = '';
             columns.forEach(col => {
                 const values = getUniqueValues(allData, col);
                 if (values.length === 0) return;
-                const div = document.createElement('div');
-                div.className = 'filter-group';
+
+                const groupDiv = document.createElement('div');
+                groupDiv.className = 'filter-group';
+
                 const label = document.createElement('label');
                 label.textContent = col;
-                div.appendChild(label);
+                groupDiv.appendChild(label);
 
-                const actions = document.createElement('div');
-                actions.className = 'filter-actions';
+                // Actions: Select All / Deselect All
+                const actionsDiv = document.createElement('div');
+                actionsDiv.className = 'filter-actions';
                 const selectAllBtn = document.createElement('button');
                 selectAllBtn.className = 'btn btn-secondary btn-sm';
                 selectAllBtn.textContent = 'Select All';
                 const deselectAllBtn = document.createElement('button');
                 deselectAllBtn.className = 'btn btn-secondary btn-sm';
                 deselectAllBtn.textContent = 'Deselect All';
-                actions.appendChild(selectAllBtn);
-                actions.appendChild(deselectAllBtn);
-                div.appendChild(actions);
+                actionsDiv.appendChild(selectAllBtn);
+                actionsDiv.appendChild(deselectAllBtn);
+                groupDiv.appendChild(actionsDiv);
 
-                const select = document.createElement('select');
-                select.multiple = true;
-                select.dataset.column = col;
+                // Checkbox list container
+                const listDiv = document.createElement('div');
+                listDiv.className = 'checkbox-list';
+
+                // We'll store references to checkboxes in an array to easily update state
+                const checkboxes = [];
                 values.forEach(val => {
-                    const opt = document.createElement('option');
-                    opt.value = val;
-                    // Display "(blank)" for empty string
-                    opt.textContent = (val === '') ? '(blank)' : val;
-                    opt.selected = true;
-                    select.appendChild(opt);
+                    const itemDiv = document.createElement('div');
+                    itemDiv.className = 'checkbox-item';
+
+                    const cb = document.createElement('input');
+                    cb.type = 'checkbox';
+                    cb.value = val;
+                    cb.checked = true; // all selected by default
+                    cb.dataset.column = col;
+
+                    const labelCb = document.createElement('label');
+                    labelCb.textContent = (val === '') ? '(blank)' : val;
+
+                    itemDiv.appendChild(cb);
+                    itemDiv.appendChild(labelCb);
+                    listDiv.appendChild(itemDiv);
+                    checkboxes.push(cb);
+
+                    // Event: on change, update filters and re-render
+                    cb.addEventListener('change', function() {
+                        const selected = checkboxes.filter(c => c.checked).map(c => c.value);
+                        activeFilters[col] = selected;
+                        applyFiltersAndRender();
+                    });
                 });
-                select.addEventListener('change', function() {
-                    const selected = Array.from(this.selectedOptions).map(o => o.value);
-                    activeFilters[col] = selected;
-                    applyFiltersAndRender();
-                });
+
+                // Select All: check all
                 selectAllBtn.addEventListener('click', function(e) {
                     e.preventDefault();
-                    Array.from(select.options).forEach(opt => opt.selected = true);
-                    const selected = Array.from(select.selectedOptions).map(o => o.value);
+                    checkboxes.forEach(cb => cb.checked = true);
+                    const selected = checkboxes.filter(c => c.checked).map(c => c.value);
                     activeFilters[col] = selected;
                     applyFiltersAndRender();
                 });
+
+                // Deselect All: uncheck all
                 deselectAllBtn.addEventListener('click', function(e) {
                     e.preventDefault();
-                    Array.from(select.options).forEach(opt => opt.selected = false);
-                    const selected = Array.from(select.selectedOptions).map(o => o.value);
+                    checkboxes.forEach(cb => cb.checked = false);
+                    const selected = checkboxes.filter(c => c.checked).map(c => c.value);
                     activeFilters[col] = selected;
                     applyFiltersAndRender();
                 });
-                div.appendChild(select);
-                filterContainer.appendChild(div);
+
+                groupDiv.appendChild(listDiv);
+                filterContainer.appendChild(groupDiv);
             });
         }
 
+        // Apply filters based on activeFilters
         function applyFilters() {
             let filtered = allData.slice();
             for (const [col, selectedVals] of Object.entries(activeFilters)) {
                 if (selectedVals && selectedVals.length > 0) {
                     const set = new Set(selectedVals);
                     filtered = filtered.filter(row => {
-                        const val = row[col] || ''; // treat undefined as empty
+                        const val = row[col] || '';
                         return set.has(val);
                     });
                 }
@@ -602,7 +634,6 @@
                     <thead><tr><th>${col}</th><th class="count">Count</th><th class="pct">%</th></tr></thead><tbody>`;
                 finalEntries.forEach(item => {
                     const pct = total > 0 ? ((item.count / total) * 100).toFixed(1) : '0.0';
-                    // Display "(blank)" for empty string
                     const displayVal = (item.value === '') ? '(blank)' : item.value;
                     const rowClass = (item.value === 'Other') ? 'other-row' : '';
                     tableHtml += `<tr class="${rowClass}"><td>${displayVal}</td><td class="count">${item.count}</td><td class="pct">${pct}%</td></tr>`;
@@ -633,7 +664,6 @@
                 card.appendChild(content);
                 summaryGrid.appendChild(card);
 
-                // Labels for chart: display "(blank)" for empty
                 const labels = finalEntries.map(item => (item.value === '') ? '(blank)' : item.value);
                 const countsData = finalEntries.map(item => item.count);
                 const colors = generateColors(finalEntries.length);
@@ -708,12 +738,15 @@
         }
 
         function clearAllFilters() {
-            const selects = filterContainer.querySelectorAll('select');
-            selects.forEach(sel => {
-                Array.from(sel.options).forEach(opt => opt.selected = true);
-                const col = sel.dataset.column;
-                const selected = Array.from(sel.selectedOptions).map(o => o.value);
-                activeFilters[col] = selected;
+            const checkboxLists = filterContainer.querySelectorAll('.checkbox-list');
+            checkboxLists.forEach(list => {
+                const cbs = list.querySelectorAll('input[type="checkbox"]');
+                cbs.forEach(cb => cb.checked = true);
+                if (cbs.length > 0) {
+                    const col = cbs[0].dataset.column;
+                    const selected = Array.from(cbs).filter(c => c.checked).map(c => c.value);
+                    activeFilters[col] = selected;
+                }
             });
             applyFiltersAndRender();
         }
