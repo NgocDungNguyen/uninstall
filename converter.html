@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TSV Converter for Uninstall Analyzer</title>
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+    <style>
+        * { box-sizing: border-box; }
+        body { font-family: 'Segoe UI', Roboto, system-ui, sans-serif; background: #f4f6f9; margin: 20px; color: #1e293b; }
+        .panel { background: #fff; border-radius: 10px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); padding: 20px; margin-bottom: 20px; }
+        .btn { background: #2563eb; color: white; border: none; padding: 8px 16px; border-radius: 6px; font-weight: 600; cursor: pointer; }
+        .btn:hover { background: #1d4ed8; }
+        .btn-success { background: #16a34a; }
+        .btn-success:hover { background: #15803d; }
+        .flex-row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin: 10px 0; }
+        table { border-collapse: collapse; width: 100%; font-size: 0.85rem; }
+        th, td { border: 1px solid #d1d5db; padding: 4px 8px; text-align: left; }
+        th { background: #f1f5f9; }
+        .mapping-row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin: 6px 0; }
+        .mapping-row label { font-weight: 500; min-width: 180px; }
+        .mapping-row select { padding: 4px 8px; border-radius: 4px; border: 1px solid #d1d5db; flex: 1; min-width: 150px; }
+        .preview-box { max-height: 200px; overflow: auto; margin-top: 10px; }
+        .status { padding: 6px 12px; border-radius: 4px; }
+        .status.info { background: #dbeafe; }
+        .status.error { background: #fecaca; }
+        .status.success { background: #bbf7d0; }
+    </style>
+</head>
+<body>
+<h1>📁 TSV Converter for Uninstall Analyzer</h1>
+<div class="sub">Upload your Excel/CSV file, map columns, and download a <strong>data.tsv</strong> ready for the analyzer.</div>
+
+<div class="panel">
+    <div class="flex-row">
+        <input type="file" id="fileInput" accept=".xlsx,.xls,.csv">
+        <button class="btn" id="loadBtn">Load File</button>
+    </div>
+    <div id="statusMsg" class="status info" style="display:inline-block; padding:6px 14px;">Ready</div>
+</div>
+
+<div id="mappingPanel" style="display:none;">
+    <div class="panel">
+        <h3>Column Mapping</h3>
+        <p>Map your columns to the required fields. Leave unmapped if not applicable.</p>
+        <div id="mappingContainer"></div>
+        <div class="flex-row" style="margin-top:12px;">
+            <button class="btn btn-success" id="convertBtn">⬇ Convert & Download TSV</button>
+            <button class="btn" id="previewBtn">👁 Preview</button>
+        </div>
+        <div id="previewContainer" style="display:none;">
+            <h4>Preview (first 5 rows)</h4>
+            <div class="preview-box" id="previewTable"></div>
+        </div>
+    </div>
+</div>
+
+<script>
+    (function() {
+        const fileInput = document.getElementById('fileInput');
+        const loadBtn = document.getElementById('loadBtn');
+        const statusMsg = document.getElementById('statusMsg');
+        const mappingPanel = document.getElementById('mappingPanel');
+        const mappingContainer = document.getElementById('mappingContainer');
+        const convertBtn = document.getElementById('convertBtn');
+        const previewBtn = document.getElementById('previewBtn');
+        const previewContainer = document.getElementById('previewContainer');
+        const previewTable = document.getElementById('previewTable');
+
+        let rawData = [];        // array of arrays (including header)
+        let headers = [];
+        let mappedData = [];
+
+        const requiredColumns = [
+            'Shop Country',
+            'Group',
+            'Usage Time Type',
+            'Uninstall Reason Categories',
+            'Latest Shopify Plan Known to Findter',
+            'Usage Time'   // raw string like "72d 25m"
+        ];
+
+        function setStatus(msg, type = 'info') {
+            statusMsg.textContent = msg;
+            statusMsg.className = 'status ' + type;
+        }
+
+        function loadFile() {
+            const file = fileInput.files[0];
+            if (!file) {
+                setStatus('Please select a file.', 'error');
+                return;
+            }
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                try {
+                    const data = new Uint8Array(e.target.result);
+                    const workbook = XLSX.read(data, { type: 'array' });
+                    const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+                    const json = XLSX.utils.sheet_to_json(firstSheet, { header: 1, defval: '' });
+                    if (json.length < 2) {
+                        setStatus('File has no data rows.', 'error');
+                        return;
+                    }
+                    rawData = json;
+                    headers = json[0].map(h => String(h).trim());
+                    setStatus(`Loaded ${json.length-1} rows. Headers: ${headers.join(', ')}`, 'success');
+                    buildMappingUI();
+                    mappingPanel.style.display = 'block';
+                    previewContainer.style.display = 'none';
+                } catch (err) {
+                    setStatus('Error reading file: ' + err.message, 'error');
+                }
+            };
+            reader.readAsArrayBuffer(file);
+        }
+
+        function buildMappingUI() {
+            mappingContainer.innerHTML = '';
+            requiredColumns.forEach(reqCol => {
+                const div = document.createElement('div');
+                div.className = 'mapping-row';
+                const label = document.createElement('label');
+                label.textContent = reqCol + ':';
+                const select = document.createElement('select');
+                select.dataset.target = reqCol;
+                // add blank option
+                const blankOpt = document.createElement('option');
+                blankOpt.value = '';
+                blankOpt.textContent = '(ignore)';
+                select.appendChild(blankOpt);
+                headers.forEach(h => {
+                    const opt = document.createElement('option');
+                    opt.value = h;
+                    opt.textContent = h;
+                    select.appendChild(opt);
+                });
+                // auto-select if header matches (case-insensitive)
+                const lowerReq = reqCol.toLowerCase();
+                const match = headers.find(h => h.toLowerCase() === lowerReq);
+                if (match) select.value = match;
+                div.appendChild(label);
+                div.appendChild(select);
+                mappingContainer.appendChild(div);
+            });
+        }
+
+        function getMapping() {
+            const mapping = {};
+            const selects = mappingContainer.querySelectorAll('select');
+            selects.forEach(sel => {
+                const target = sel.dataset.target;
+                const value = sel.value;
+                if (value) mapping[target] = value;
+            });
+            return mapping;
+        }
+
+        function convertToTSV() {
+            const mapping = getMapping();
+            // Build header row: keep all original columns that are mapped? We'll include all original columns but we also want to add the required columns if they map to something.
+            // Actually we need to produce TSV with exactly the columns that the analyzer expects: it expects columns like "Shop Country", "Group", etc. The analyzer also uses "Usage Time" for parsing.
+            // So we should output a TSV with the columns in the same order as in the original file, but we also need to ensure that the required columns are present (by mapping or by keeping original if they exist).
+            // But the analyzer can handle any columns, it just looks for those specific names. So we should include all original columns and also possibly add the mapped required columns if they are not already present.
+            // However, the analyzer uses the column names to find indices. So we need to produce TSV with the exact column names that the analyzer expects.
+            // The analyzer expects: "Shop Country", "Group", "Usage Time Type", "Uninstall Reason Categories", "Latest Shopify Plan Known to Findter", and also "Usage Time" for parsing.
+            // If the user's file has different names, we need to rename columns according to mapping.
+            // Let's create a new header row based on mapping.
+            const targetHeaders = [];
+            // We'll include all mapped required columns plus any other original columns that are not mapped.
+            const usedOriginal = new Set();
+            const outputColumns = [];
+            // First add the required columns in the order they appear in requiredColumns
+            requiredColumns.forEach(req => {
+                const orig = mapping[req];
+                if (orig) {
+                    outputColumns.push(req);
+                    usedOriginal.add(orig);
+                } else {
+                    // If not mapped, we still might have a column with that exact name in original (if it exists)
+                    const exact = headers.find(h => h.toLowerCase() === req.toLowerCase());
+                    if (exact && !usedOriginal.has(exact)) {
+                        outputColumns.push(req);
+                        usedOriginal.add(exact);
+                    }
+                }
+            });
+            // Then add any remaining original columns that weren't used
+            headers.forEach(h => {
+                if (!usedOriginal.has(h)) {
+                    outputColumns.push(h);
+                }
+            });
+
+            // Build rows
+            const rows = [];
+            rows.push(outputColumns);
+            for (let i = 1; i < rawData.length; i++) {
+                const row = rawData[i];
+                const newRow = outputColumns.map(col => {
+                    // If col is a required column that we mapped, get value from original
+                    const origCol = mapping[col];
+                    if (origCol) {
+                        const idx = headers.indexOf(origCol);
+                        return row[idx] || '';
+                    } else {
+                        // If col is an original column name, get it directly
+                        const idx = headers.indexOf(col);
+                        if (idx !== -1) return row[idx] || '';
+                        // Otherwise, if col is a required but not mapped, try to find exact name match
+                        const exactIdx = headers.findIndex(h => h.toLowerCase() === col.toLowerCase());
+                        if (exactIdx !== -1) return row[exactIdx] || '';
+                        return '';
+                    }
+                });
+                rows.push(newRow);
+            }
+            return rows;
+        }
+
+        function downloadTSV(rows) {
+            const tsv = rows.map(row => row.join('\t')).join('\n');
+            const blob = new Blob([tsv], { type: 'text/tab-separated-values' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'data.tsv';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }
+
+        function previewTSV() {
+            const rows = convertToTSV();
+            if (rows.length === 0) {
+                setStatus('No data to preview.', 'error');
+                return;
+            }
+            const previewRows = rows.slice(0, 6); // header + 5 data
+            let html = '<table><thead><tr>';
+            previewRows[0].forEach(h => html += `<th>${h}</th>`);
+            html += '</tr></thead><tbody>';
+            for (let i = 1; i < previewRows.length; i++) {
+                html += '<tr>';
+                previewRows[i].forEach(cell => html += `<td>${cell}</td>`);
+                html += '</tr>';
+            }
+            html += '</tbody></table>';
+            previewTable.innerHTML = html;
+            previewContainer.style.display = 'block';
+            setStatus(`Preview ready (${previewRows.length-1} rows shown).`, 'info');
+        }
+
+        loadBtn.addEventListener('click', loadFile);
+        convertBtn.addEventListener('click', function() {
+            const rows = convertToTSV();
+            if (rows.length < 2) {
+                setStatus('No data to convert.', 'error');
+                return;
+            }
+            downloadTSV(rows);
+            setStatus('TSV downloaded as data.tsv', 'success');
+        });
+        previewBtn.addEventListener('click', previewTSV);
+    })();
+</script>
+</body>
+</html>
