@@ -221,7 +221,12 @@
             font-weight: 600;
             position: sticky;
             top: 0;
+            cursor: pointer;
+            user-select: none;
         }
+        .data-table-wrap th:hover { background: #e2e8f0; }
+        .data-table-wrap th.sorted-asc::after { content: " ▲"; }
+        .data-table-wrap th.sorted-desc::after { content: " ▼"; }
         .log {
             background: #f1f5f9;
             border-left: 4px solid #2563eb;
@@ -243,6 +248,27 @@
         .footer { margin-top: 20px; color: #64748b; font-size: 0.85rem; }
         .other-row { font-style: italic; color: #64748b; }
         .no-data { color: #94a3b8; text-align: center; padding: 20px; }
+        .custom-bin-section {
+            margin-top: 8px;
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 8px;
+        }
+        .custom-bin-section input {
+            flex: 1;
+            min-width: 150px;
+            padding: 4px 8px;
+            border: 1px solid #d1d5db;
+            border-radius: 4px;
+            font-size: 0.85rem;
+        }
+        .export-buttons {
+            margin-top: 10px;
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
     </style>
 </head>
 <body>
@@ -294,6 +320,10 @@
         <div style="margin-top:12px;">
             <span class="table-toggle" id="toggleTableBtn">📋 Show filtered data table</span>
             <div id="dataTableWrap" class="data-table-wrap"><div id="dataTableContainer"></div></div>
+            <div class="export-buttons">
+                <button class="btn btn-success btn-sm" id="exportCSVBtn">⬇ Export Filtered Data (CSV)</button>
+                <button class="btn btn-success btn-sm" id="exportSummaryCSVBtn">⬇ Export Summary (CSV)</button>
+            </div>
         </div>
     </div>
 </div>
@@ -303,7 +333,8 @@
 <div class="footer">
     <strong>How it works:</strong> The tool counts uninstalled shops by each categorical column. Use the filters (checkboxes) to drill down. Percentages are relative to the filtered set.<br>
     Columns analyzed: <em>Shop Country, Group, Usage Time Type, Uninstall Reason Categories, Latest Shopify Plan Known to Findter</em>.<br>
-    Use "Top N" to show only the most frequent values (others grouped into "Other").
+    Use "Top N" to show only the most frequent values (others grouped into "Other").<br>
+    <strong>New:</strong> Define custom time bins (in minutes) to group by usage duration. The "Usage Time" column is automatically parsed.
 </div>
 
 <script>
@@ -327,6 +358,8 @@
         const topNInput = document.getElementById('topNInput');
         const sortBySelect = document.getElementById('sortBySelect');
         const includeOtherCheck = document.getElementById('includeOtherCheck');
+        const exportCSVBtn = document.getElementById('exportCSVBtn');
+        const exportSummaryCSVBtn = document.getElementById('exportSummaryCSVBtn');
 
         // Data state
         let allData = [];
@@ -334,8 +367,10 @@
         let filteredData = [];
         let activeFilters = {};
         let chartInstances = {};
+        let customBinThresholds = [];
+        let customBinColumnName = 'Usage Time (bins)';
 
-        const ANALYZE_COLUMNS = [
+        const ANALYZE_COLUMNS_BASE = [
             'Shop Country',
             'Group',
             'Usage Time Type',
@@ -351,6 +386,18 @@
             return headerRow.findIndex(h => h.trim().toLowerCase() === colName.toLowerCase());
         }
 
+        function parseUsageTime(str) {
+            if (!str) return 0;
+            let minutes = 0;
+            const dayMatch = str.match(/(\d+)d/);
+            const hourMatch = str.match(/(\d+)h/);
+            const minMatch = str.match(/(\d+)m/);
+            if (dayMatch) minutes += parseInt(dayMatch[1]) * 1440;
+            if (hourMatch) minutes += parseInt(hourMatch[1]) * 60;
+            if (minMatch) minutes += parseInt(minMatch[1]);
+            return minutes;
+        }
+
         function rowsToObjects(rows, headerRow) {
             const result = [];
             for (let i = 1; i < rows.length; i++) {
@@ -360,12 +407,48 @@
                     const key = headerRow[j].trim();
                     obj[key] = (row.length > j) ? row[j].trim() : '';
                 }
+                const usageTimeIdx = findColIndex(headerRow, 'Usage Time');
+                if (usageTimeIdx !== -1) {
+                    const raw = obj['Usage Time'] || '';
+                    obj['_usageMinutes'] = parseUsageTime(raw);
+                } else {
+                    obj['_usageMinutes'] = 0;
+                }
                 result.push(obj);
             }
             return result;
         }
 
-        // Include empty string as a value if any row has empty for that column
+        function applyCustomBins(data, thresholds) {
+            const sorted = thresholds.slice().sort((a,b) => a - b);
+            const bins = [];
+            let prev = 0;
+            for (let i = 0; i < sorted.length; i++) {
+                const t = sorted[i];
+                const label = (i === 0) ? `≤ ${t}m` : `${prev+1}-${t}m`;
+                bins.push({ max: t, label: label });
+                prev = t;
+            }
+            if (sorted.length > 0) {
+                bins.push({ max: Infinity, label: `> ${sorted[sorted.length-1]}m` });
+            } else {
+                bins.push({ max: Infinity, label: 'All' });
+            }
+
+            data.forEach(row => {
+                const mins = row['_usageMinutes'] || 0;
+                let binLabel = 'Unknown';
+                for (const bin of bins) {
+                    if (mins <= bin.max) {
+                        binLabel = bin.label;
+                        break;
+                    }
+                }
+                row[customBinColumnName] = binLabel;
+            });
+            return bins;
+        }
+
         function getUniqueValues(data, colName) {
             const set = new Set();
             let hasEmpty = false;
@@ -379,7 +462,7 @@
             });
             const vals = Array.from(set).sort();
             if (hasEmpty) {
-                vals.push('');  // represent blank as empty string
+                vals.push('');
             }
             return vals;
         }
@@ -429,6 +512,60 @@
             return colors;
         }
 
+        function addCustomBinUI(container) {
+            let binSection = container.querySelector('.custom-bin-section');
+            if (!binSection) {
+                binSection = document.createElement('div');
+                binSection.className = 'custom-bin-section';
+                binSection.innerHTML = `
+                    <span style="font-weight:600;">Custom Time Bins (minutes):</span>
+                    <input type="text" id="customBinInput" placeholder="e.g., 30, 60, 120, 360, 1440, 10080" style="flex:2; min-width:200px;">
+                    <button class="btn btn-secondary btn-sm" id="applyBinBtn">Apply Bins</button>
+                    <button class="btn btn-secondary btn-sm" id="resetBinBtn">Reset</button>
+                `;
+                container.appendChild(binSection);
+
+                const applyBtn = document.getElementById('applyBinBtn');
+                const resetBtn = document.getElementById('resetBinBtn');
+                const inputField = document.getElementById('customBinInput');
+
+                applyBtn.addEventListener('click', function() {
+                    const raw = inputField.value.trim();
+                    if (!raw) {
+                        setStatus('Please enter thresholds (comma-separated numbers in minutes).', 'error');
+                        return;
+                    }
+                    const thresholds = raw.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n) && n > 0);
+                    if (thresholds.length === 0) {
+                        setStatus('No valid numbers found. Use comma-separated integers.', 'error');
+                        return;
+                    }
+                    customBinThresholds = thresholds;
+                    applyCustomBins(allData, customBinThresholds);
+                    rebuildAnalysis();
+                });
+
+                resetBtn.addEventListener('click', function() {
+                    customBinThresholds = [];
+                    allData.forEach(row => delete row[customBinColumnName]);
+                    rebuildAnalysis();
+                });
+            }
+        }
+
+        function rebuildAnalysis() {
+            buildFilterUI(getAnalyzeColumns());
+            applyFiltersAndRender();
+        }
+
+        function getAnalyzeColumns() {
+            const cols = ANALYZE_COLUMNS_BASE.slice();
+            if (allData.length > 0 && allData[0].hasOwnProperty(customBinColumnName)) {
+                cols.push(customBinColumnName);
+            }
+            return cols;
+        }
+
         function analyze() {
             const draftText = draftInput.value;
             if (!draftText.trim()) {
@@ -436,74 +573,46 @@
                 return;
             }
 
-            // ---- DEBUG: Count raw lines ----
-            const rawLines = draftText.split(/\r?\n/);
-            const nonEmptyLines = rawLines.filter(line => line.trim() !== '');
-            let logMsg = `📋 Total raw lines (including blanks): ${rawLines.length}\n`;
-            logMsg += `📋 Non-empty lines: ${nonEmptyLines.length}\n`;
-            if (nonEmptyLines.length > 0) {
-                logMsg += `📋 Preview of first non-empty line:\n  ${nonEmptyLines[0]}\n`;
-            }
-            if (nonEmptyLines.length > 1) {
-                logMsg += `📋 Preview of second non-empty line:\n  ${nonEmptyLines[1]}\n`;
-            }
-            if (nonEmptyLines.length > 2) {
-                logMsg += `📋 Preview of third non-empty line:\n  ${nonEmptyLines[2]}\n`;
-            }
-
             let rows;
             try {
                 rows = parseTSV(draftText);
             } catch (e) {
                 setStatus('Error parsing: ' + e.message, 'error');
-                logArea.textContent = logMsg + '\n❌ Parse error: ' + e.message;
+                logArea.textContent = '❌ Parse error: ' + e.message;
                 return;
             }
 
-            logMsg += `📋 Parsed rows (including header): ${rows.length}\n`;
             if (rows.length < 2) {
                 setStatus('Need at least a header row and one data row.', 'error');
-                logArea.textContent = logMsg;
                 return;
             }
 
             const headerRow = rows[0];
             headers = headerRow.map(h => h.trim());
-            logMsg += '📋 Columns found:\n' + headers.map((h,i) => `  ${i}: ${h}`).join('\n');
+            allData = rowsToObjects(rows, headerRow);
 
-            const foundColumns = [];
-            ANALYZE_COLUMNS.forEach(col => {
-                const idx = findColIndex(headerRow, col);
-                if (idx !== -1) {
-                    foundColumns.push(col);
-                }
-            });
-            if (foundColumns.length === 0) {
-                setStatus('Could not find any of the expected columns: ' + ANALYZE_COLUMNS.join(', '), 'error');
-                logArea.textContent = logMsg;
+            const usageIdx = findColIndex(headerRow, 'Usage Time');
+            if (usageIdx === -1) {
+                setStatus('Column "Usage Time" not found. Cannot create custom bins.', 'error');
+                logArea.textContent = '⚠️ "Usage Time" column missing.';
                 return;
             }
 
-            allData = rowsToObjects(rows, headerRow);
-            logMsg += `📋 Data rows (excluding header): ${allData.length}\n`;
-            logArea.textContent = logMsg;
+            customBinThresholds = [];
+            allData.forEach(row => delete row[customBinColumnName]);
 
-            // Initialize filters: include all unique values (including empty)
-            activeFilters = {};
-            foundColumns.forEach(col => {
-                const values = getUniqueValues(allData, col);
-                activeFilters[col] = values; // all selected by default
-            });
-
-            buildFilterUI(foundColumns);
+            buildFilterUI(getAnalyzeColumns());
             applyFiltersAndRender();
+
+            const filterPanel = document.getElementById('filterPanel');
+            addCustomBinUI(filterPanel);
 
             filterPanel.style.display = 'block';
             summaryPanel.style.display = 'block';
             setStatus(`✅ Analysis complete. Processed ${allData.length} rows.`, 'info');
+            logArea.textContent = `📋 Parsed ${allData.length} rows. Usage Time column found. Define custom bins to group by duration.`;
         }
 
-        // ----- Build filter UI with checkboxes -----
         function buildFilterUI(columns) {
             filterContainer.innerHTML = '';
             columns.forEach(col => {
@@ -517,7 +626,6 @@
                 label.textContent = col;
                 groupDiv.appendChild(label);
 
-                // Actions: Select All / Deselect All
                 const actionsDiv = document.createElement('div');
                 actionsDiv.className = 'filter-actions';
                 const selectAllBtn = document.createElement('button');
@@ -530,11 +638,9 @@
                 actionsDiv.appendChild(deselectAllBtn);
                 groupDiv.appendChild(actionsDiv);
 
-                // Checkbox list container
                 const listDiv = document.createElement('div');
                 listDiv.className = 'checkbox-list';
 
-                // We'll store references to checkboxes in an array to easily update state
                 const checkboxes = [];
                 values.forEach(val => {
                     const itemDiv = document.createElement('div');
@@ -543,7 +649,7 @@
                     const cb = document.createElement('input');
                     cb.type = 'checkbox';
                     cb.value = val;
-                    cb.checked = true; // all selected by default
+                    cb.checked = true;
                     cb.dataset.column = col;
 
                     const labelCb = document.createElement('label');
@@ -554,7 +660,6 @@
                     listDiv.appendChild(itemDiv);
                     checkboxes.push(cb);
 
-                    // Event: on change, update filters and re-render
                     cb.addEventListener('change', function() {
                         const selected = checkboxes.filter(c => c.checked).map(c => c.value);
                         activeFilters[col] = selected;
@@ -562,7 +667,6 @@
                     });
                 });
 
-                // Select All: check all
                 selectAllBtn.addEventListener('click', function(e) {
                     e.preventDefault();
                     checkboxes.forEach(cb => cb.checked = true);
@@ -571,7 +675,6 @@
                     applyFiltersAndRender();
                 });
 
-                // Deselect All: uncheck all
                 deselectAllBtn.addEventListener('click', function(e) {
                     e.preventDefault();
                     checkboxes.forEach(cb => cb.checked = false);
@@ -582,10 +685,21 @@
 
                 groupDiv.appendChild(listDiv);
                 filterContainer.appendChild(groupDiv);
+
+                if (!activeFilters[col]) {
+                    const allVals = checkboxes.map(cb => cb.value);
+                    activeFilters[col] = allVals;
+                }
+            });
+
+            columns.forEach(col => {
+                if (!activeFilters[col]) {
+                    const vals = getUniqueValues(allData, col);
+                    activeFilters[col] = vals;
+                }
             });
         }
 
-        // Apply filters based on activeFilters
         function applyFilters() {
             let filtered = allData.slice();
             for (const [col, selectedVals] of Object.entries(activeFilters)) {
@@ -609,8 +723,8 @@
 
         function renderSummary(data) {
             const total = data.length;
-            const cols = ANALYZE_COLUMNS.filter(col => {
-                return headers.some(h => h.trim().toLowerCase() === col.toLowerCase());
+            const cols = getAnalyzeColumns().filter(col => {
+                return data.some(row => row.hasOwnProperty(col));
             });
 
             const topNInputVal = topNInput.value.trim();
@@ -714,27 +828,59 @@
                 dataTableContainer.innerHTML = '<p style="color:#64748b;">No rows match the current filters.</p>';
                 return;
             }
-            const colNames = headers;
-            let html = `<table><thead><tr>`;
-            colNames.forEach(h => {
-                html += `<th>${h}</th>`;
+            let displayCols = headers.slice();
+            if (!displayCols.includes('_usageMinutes')) {
+                displayCols.push('_usageMinutes');
+            }
+            if (data[0].hasOwnProperty(customBinColumnName) && !displayCols.includes(customBinColumnName)) {
+                displayCols.push(customBinColumnName);
+            }
+
+            let html = `<table id="sortableTable"><thead><tr>`;
+            displayCols.forEach(h => {
+                html += `<th data-col="${h}">${h}</th>`;
             });
             html += `</tr></thead><tbody>`;
-            const maxRows = 100;
-            const displayData = data.slice(0, maxRows);
-            displayData.forEach(row => {
+            data.forEach(row => {
                 html += `<tr>`;
-                colNames.forEach(h => {
-                    const val = row[h] || '';
+                displayCols.forEach(h => {
+                    let val = row[h] !== undefined ? row[h] : '';
+                    if (h === '_usageMinutes') val = val + ' min';
                     html += `<td>${val}</td>`;
                 });
                 html += `</tr>`;
             });
-            if (data.length > maxRows) {
-                html += `<tr><td colspan="${colNames.length}" style="text-align:center;color:#64748b;">... and ${data.length - maxRows} more rows</td></tr>`;
-            }
             html += `</tbody></table>`;
             dataTableContainer.innerHTML = html;
+
+            const table = document.getElementById('sortableTable');
+            if (table) {
+                const headers = table.querySelectorAll('th');
+                headers.forEach((th, index) => {
+                    th.addEventListener('click', function() {
+                        const col = this.dataset.col;
+                        const tbody = table.querySelector('tbody');
+                        const rows = Array.from(tbody.querySelectorAll('tr'));
+                        const isAsc = this.classList.contains('sorted-asc');
+                        const direction = isAsc ? -1 : 1;
+                        rows.sort((a, b) => {
+                            const aVal = a.querySelectorAll('td')[index].textContent.trim();
+                            const bVal = b.querySelectorAll('td')[index].textContent.trim();
+                            const aNum = parseFloat(aVal.replace(/[^0-9.-]/g, ''));
+                            const bNum = parseFloat(bVal.replace(/[^0-9.-]/g, ''));
+                            if (!isNaN(aNum) && !isNaN(bNum)) {
+                                return (aNum - bNum) * direction;
+                            }
+                            return aVal.localeCompare(bVal) * direction;
+                        });
+                        rows.forEach(row => tbody.appendChild(row));
+                        headers.forEach(h => {
+                            h.classList.remove('sorted-asc', 'sorted-desc');
+                        });
+                        this.classList.add(direction === 1 ? 'sorted-asc' : 'sorted-desc');
+                    });
+                });
+            }
         }
 
         function clearAllFilters() {
@@ -761,8 +907,8 @@
                 setStatus('No data to copy. Please analyze first.', 'error');
                 return;
             }
-            const cols = ANALYZE_COLUMNS.filter(col => {
-                return headers.some(h => h.trim().toLowerCase() === col.toLowerCase());
+            const cols = getAnalyzeColumns().filter(col => {
+                return filteredData.some(row => row.hasOwnProperty(col));
             });
             let text = `Total rows: ${filteredData.length}\n\n`;
             const topNInputVal = topNInput.value.trim();
@@ -797,6 +943,74 @@
             });
         }
 
+        function exportCSV() {
+            if (filteredData.length === 0) {
+                setStatus('No data to export. Please analyze first.', 'error');
+                return;
+            }
+            let displayCols = headers.slice();
+            if (!displayCols.includes('_usageMinutes')) {
+                displayCols.push('_usageMinutes');
+            }
+            if (filteredData[0].hasOwnProperty(customBinColumnName) && !displayCols.includes(customBinColumnName)) {
+                displayCols.push(customBinColumnName);
+            }
+            let csv = displayCols.join(',') + '\n';
+            filteredData.forEach(row => {
+                const rowData = displayCols.map(h => {
+                    let val = row[h] !== undefined ? row[h] : '';
+                    if (h === '_usageMinutes') val = val + ' min';
+                    if (typeof val === 'string' && (val.includes(',') || val.includes('"') || val.includes('\n'))) {
+                        val = '"' + val.replace(/"/g, '""') + '"';
+                    }
+                    return val;
+                });
+                csv += rowData.join(',') + '\n';
+            });
+            downloadFile(csv, 'filtered_data.csv', 'text/csv');
+        }
+
+        function exportSummaryCSV() {
+            if (filteredData.length === 0) {
+                setStatus('No data to export. Please analyze first.', 'error');
+                return;
+            }
+            const cols = getAnalyzeColumns().filter(col => {
+                return filteredData.some(row => row.hasOwnProperty(col));
+            });
+            let csv = 'Column,Value,Count,Percentage\n';
+            const topNInputVal = topNInput.value.trim();
+            const topN = (topNInputVal === '') ? null : parseInt(topNInputVal, 10);
+            const sortBy = sortBySelect.value;
+            const includeOther = includeOtherCheck.checked;
+
+            cols.forEach(col => {
+                const counts = countValues(filteredData, col);
+                if (Object.keys(counts).length === 0) return;
+                let entries = getSortedCounts(counts, sortBy);
+                entries = applyTopN(entries, topN, includeOther);
+                entries.forEach(item => {
+                    const pct = filteredData.length > 0 ? ((item.count / filteredData.length) * 100).toFixed(1) : '0.0';
+                    const displayVal = (item.value === '') ? '(blank)' : item.value;
+                    csv += `${col},${displayVal},${item.count},${pct}%\n`;
+                });
+                csv += '\n';
+            });
+            downloadFile(csv, 'summary.csv', 'text/csv');
+        }
+
+        function downloadFile(content, filename, mimeType) {
+            const blob = new Blob([content], { type: mimeType });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }
+
         function setStatus(msg, type = 'info') {
             statusMsg.textContent = msg;
             statusMsg.className = 'status ' + type;
@@ -814,6 +1028,7 @@
             allData = [];
             filteredData = [];
             activeFilters = {};
+            customBinThresholds = [];
             logArea.textContent = '📌 Log will appear here.';
             setStatus('Cleared.', 'info');
             for (const key in chartInstances) {
@@ -822,11 +1037,14 @@
             chartInstances = {};
         }
 
+        // Event listeners
         analyzeBtn.addEventListener('click', analyze);
         clearBtn.addEventListener('click', clearAll);
         clearFiltersBtn.addEventListener('click', clearAllFilters);
         toggleTableBtn.addEventListener('click', toggleDataTable);
         copySummaryBtn.addEventListener('click', copySummary);
+        exportCSVBtn.addEventListener('click', exportCSV);
+        exportSummaryCSVBtn.addEventListener('click', exportSummaryCSV);
 
         topNInput.addEventListener('change', function() {
             if (filteredData.length > 0) applyFiltersAndRender();
@@ -836,6 +1054,25 @@
         });
         includeOtherCheck.addEventListener('change', function() {
             if (filteredData.length > 0) applyFiltersAndRender();
+        });
+
+        // ----- AUTO-LOAD data.tsv on page load -----
+        window.addEventListener('DOMContentLoaded', function() {
+            fetch('data.tsv')
+                .then(response => {
+                    if (!response.ok) throw new Error('File not found');
+                    return response.text();
+                })
+                .then(text => {
+                    draftInput.value = text;
+                    setStatus('✅ Auto‑loaded data.tsv', 'info');
+                    analyze(); // run analysis automatically
+                })
+                .catch(err => {
+                    // Silently ignore – user can paste manually
+                    console.log('No data.tsv found, waiting for user input.');
+                    setStatus('No data.tsv found. Paste data or upload via converter.', 'info');
+                });
         });
     })();
 </script>
